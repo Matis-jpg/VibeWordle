@@ -4,28 +4,56 @@ const message = document.getElementById("message");
 const newWordButton = document.getElementById("newWordButton");
 const wordLengthSelect = document.getElementById("wordLength");
 const meaningButton = document.getElementById("meaningButton");
-let completedWord = "";
 
 const keys = ["QWERTYUIOP", "ASDFGHJKL", "ENTERZXCVBNMDEL"];
-let sessionId = localStorage.getItem("sessionId") || "";
-let currentGuess = "";
-let currentRow = 0;
-let gameOver = false;
+
+let savedData = {};
+
+try {
+  savedData = JSON.parse(localStorage.getItem("jerrydleData")) || {};
+} catch {
+  savedData = {};
+}
+
+let completedWord = savedData.completedWord || "";
+let sessionId = savedData.sessionId || localStorage.getItem("sessionId") || "";
+let currentGuess = savedData.currentGuess || "";
+let currentRow = savedData.currentRow || 0;
+let gameOver = savedData.gameOver || false;
 let loading = false;
-let round = 0;
-let wordLength = 5;
-let keyStates = {};
+let round = savedData.round || 0;
+let wordLength = savedData.wordLength || 5;
+let keyStates = savedData.keyStates || {};
+let guessHistory = savedData.guessHistory || [];
 
 const stats = {
-  played: Number(localStorage.getItem("played") || 0),
-  wins: Number(localStorage.getItem("wins") || 0),
-  streak: Number(localStorage.getItem("streak") || 0)
+  played: Number(savedData.played ?? localStorage.getItem("played") ?? 0),
+  wins: Number(savedData.wins ?? localStorage.getItem("wins") ?? 0),
+  streak: Number(savedData.streak ?? localStorage.getItem("streak") ?? 0)
 };
 
+function saveGameData() {
+  const data = {
+    played: stats.played,
+    wins: stats.wins,
+    streak: stats.streak,
+
+    sessionId,
+    wordLength,
+    currentGuess,
+    currentRow,
+    gameOver,
+    round,
+    keyStates,
+    guessHistory,
+    completedWord
+  };
+
+  localStorage.setItem("jerrydleData", JSON.stringify(data));
+}
+
 function saveStats() {
-  localStorage.setItem("played", stats.played);
-  localStorage.setItem("wins", stats.wins);
-  localStorage.setItem("streak", stats.streak);
+  saveGameData();
 }
 
 function updateStats() {
@@ -73,6 +101,49 @@ function createKeyboard() {
   });
 }
 
+function restoreGame() {
+  createBoard();
+  createKeyboard();
+
+  wordLengthSelect.value = wordLength;
+
+  // Restore previous guesses
+  guessHistory.forEach((entry, row) => {
+    for (let col = 0; col < wordLength; col++) {
+      const tile = document.getElementById(`tile-${row}-${col}`);
+
+      tile.textContent = entry.guess[col];
+      tile.classList.add("filled", entry.colors[col]);
+    }
+  });
+
+  // Restore keyboard colors
+  updateKeyboard();
+
+  // Restore unfinished guess
+  updateCurrentGuess();
+
+  // Restore round number
+  document.getElementById("roundNumber").textContent = `ROUND ${round}`;
+
+  // Restore completed game
+  if (gameOver) {
+    meaningButton.classList.remove("hidden");
+    meaningButton.disabled = false;
+
+    if (guessHistory.some(entry => entry.guess === completedWord)) {
+      showMessage("🎉 Excellent! You guessed the word!");
+    } else {
+      showMessage(`Game over! The word was ${completedWord}.`);
+    }
+  } else {
+    meaningButton.classList.add("hidden");
+    meaningButton.disabled = true;
+
+    showMessage(`Game restored! ${6 - currentRow} attempts remaining.`);
+  }
+}
+
 function createKey(letter, extraClass = "") {
   const button = document.createElement("button");
   button.className = `key ${extraClass}`;
@@ -110,15 +181,20 @@ function updateCurrentGuess() {
 
 function handleKey(key) {
   if (gameOver || loading) return;
+
   if (key === "ENTER") return submitGuess();
+
   if (key === "DEL") {
     currentGuess = currentGuess.slice(0, -1);
     updateCurrentGuess();
+    saveGameData();
     return;
   }
+
   if (/^[A-Z]$/.test(key) && currentGuess.length < wordLength) {
     currentGuess += key;
     updateCurrentGuess();
+    saveGameData();
   }
 }
 
@@ -162,6 +238,8 @@ async function startNewGame() {
     currentRow = 0;
     gameOver = false;
     keyStates = {};
+    guessHistory = [];
+    completedWord = "";
     round++;
 
     createBoard();
@@ -172,6 +250,7 @@ async function startNewGame() {
 
     document.getElementById("roundNumber").textContent = `ROUND ${round}`;
     showMessage(`Guess the ${wordLength}-letter word!`);
+    saveGameData();
   } catch (error) {
     showMessage(error.message);
   } finally {
@@ -213,6 +292,13 @@ async function submitGuess() {
     }
 
     updateKeyboard();
+
+    // Save the submitted guess and its tile colors
+    guessHistory.push({
+      guess,
+      colors
+    });
+
     currentGuess = "";
     currentRow++;
 
@@ -225,9 +311,13 @@ async function submitGuess() {
       stats.played++;
       stats.wins++;
       stats.streak++;
+
       saveStats();
       updateStats();
+
       completedWord = answer;
+      saveGameData();
+      
       meaningButton.classList.remove("hidden");
       meaningButton.disabled = false;
       showMessage("🎉 Excellent! You guessed the word!");
@@ -236,11 +326,16 @@ async function submitGuess() {
 
     if (lost) {
       gameOver = true;
+
       stats.played++;
       stats.streak = 0;
+
       saveStats();
       updateStats();
+
       completedWord = answer;
+      saveGameData();
+
       meaningButton.classList.remove("hidden");
       meaningButton.disabled = false;
       showMessage(`Game over! The word was ${answer}.`);
@@ -248,6 +343,7 @@ async function submitGuess() {
     }
 
     showMessage(`${result.attemptsRemaining} attempts remaining`);
+    saveGameData();
   } catch (error) {
     showMessage(error.message);
     board.classList.remove("shake");
@@ -290,4 +386,14 @@ meaningButton.addEventListener("click", () => {
 });
 
 updateStats();
-startNewGame();
+
+if (
+  sessionId &&
+  round > 0 &&
+  [5, 6, 7].includes(wordLength) &&
+  Array.isArray(guessHistory)
+) {
+  restoreGame();
+} else {
+  startNewGame();
+}
