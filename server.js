@@ -4,8 +4,6 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
-
-// Possible secret words.
 const WORDS = require("./words.json");
 
 if (!Array.isArray(WORDS) || WORDS.length === 0) {
@@ -13,32 +11,37 @@ if (!Array.isArray(WORDS) || WORDS.length === 0) {
 }
 
 const VALID_WORDS = new Set(WORDS);
+const WORD_LENGTHS = [5, 6, 7];
 const sessions = new Map();
 
-function chooseWord(previousWord) {
-  const available = WORDS.filter(word => word !== previousWord);
-  const pool = available.length ? available : WORDS;
-  return pool[Math.floor(Math.random() * pool.length)];
+function chooseWord(wordLength, previousWord) {
+  const pool = WORDS.filter(word =>
+    word.length === wordLength && word !== previousWord
+  );
+  const fallback = WORDS.filter(word => word.length === wordLength);
+
+  if (fallback.length === 0) {
+    throw new Error(`No ${wordLength}-letter words are available. Run npm run setup.`);
+  }
+
+  const available = pool.length ? pool : fallback;
+  return available[Math.floor(Math.random() * available.length)];
 }
 
 function scoreGuess(guess, answer) {
-  const result = Array(5).fill("absent");
+  const result = Array(answer.length).fill("absent");
   const remaining = answer.split("");
 
-  // First pass: identify correct positions.
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < answer.length; i++) {
     if (guess[i] === answer[i]) {
       result[i] = "correct";
       remaining[i] = null;
     }
   }
 
-  // Second pass: identify misplaced letters.
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < answer.length; i++) {
     if (result[i] === "correct") continue;
-
     const index = remaining.indexOf(guess[i]);
-
     if (index !== -1) {
       result[i] = "present";
       remaining[index] = null;
@@ -59,16 +62,13 @@ function sendJSON(res, status, data) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
-
     req.on("data", chunk => {
       body += chunk;
-
       if (body.length > 10000) {
         reject(new Error("Request too large"));
         req.destroy();
       }
     });
-
     req.on("end", () => {
       try {
         resolve(JSON.parse(body || "{}"));
@@ -76,7 +76,6 @@ function readBody(req) {
         reject(new Error("Invalid JSON"));
       }
     });
-
     req.on("error", reject);
   });
 }
@@ -87,22 +86,25 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "POST" && url.pathname === "/api/new") {
       const body = await readBody(req);
+      const wordLength = Number(body.wordLength || 5);
+
+      if (!WORD_LENGTHS.includes(wordLength)) {
+        return sendJSON(res, 400, { error: "Choose a 5, 6, or 7-letter mode." });
+      }
 
       let sessionId = body.sessionId;
-
-      if (
-        typeof sessionId !== "string" ||
-        !/^[a-f0-9]{32}$/.test(sessionId)
-      ) {
+      if (typeof sessionId !== "string" || !/^[a-f0-9]{32}$/.test(sessionId)) {
         sessionId = crypto.randomBytes(16).toString("hex");
       }
 
-      const previous = sessions.get(sessionId)?.previousWord || null;
-      const answer = chooseWord(previous);
+      const previousWords = sessions.get(sessionId)?.previousWords || {};
+      const answer = chooseWord(wordLength, previousWords[wordLength] || null);
+      previousWords[wordLength] = answer;
 
       sessions.set(sessionId, {
         answer,
-        previousWord: answer,
+        wordLength,
+        previousWords,
         guesses: 0,
         finished: false
       });
@@ -110,39 +112,28 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, {
         sessionId,
         attempts: 6,
-        wordLength: 5
+        wordLength
       });
     }
 
     if (req.method === "POST" && url.pathname === "/api/guess") {
       const body = await readBody(req);
-      const { sessionId } = body;
+      const session = sessions.get(body.sessionId);
       const guess = String(body.guess || "").toUpperCase();
 
-      const session = sessions.get(sessionId);
-
       if (!session) {
-        return sendJSON(res, 400, {
-          error: "Game session not found. Start a new game."
-        });
+        return sendJSON(res, 400, { error: "Game session not found. Start a new game." });
       }
-
       if (session.finished) {
+        return sendJSON(res, 400, { error: "This round is already finished." });
+      }
+      if (!new RegExp(`^[A-Z]{${session.wordLength}}$`).test(guess)) {
         return sendJSON(res, 400, {
-          error: "This round is already finished."
+          error: `Your guess must contain exactly ${session.wordLength} letters.`
         });
       }
-
-      if (!/^[A-Z]{5}$/.test(guess)) {
-        return sendJSON(res, 400, {
-          error: "Your guess must contain exactly five letters."
-        });
-      }
-
       if (!VALID_WORDS.has(guess)) {
-        return sendJSON(res, 400, {
-          error: "Not in the word list."
-        });
+        return sendJSON(res, 400, { error: "Not in the word list." });
       }
 
       const colors = scoreGuess(guess, session.answer);
@@ -150,10 +141,7 @@ const server = http.createServer(async (req, res) => {
 
       const won = guess === session.answer;
       const lost = !won && session.guesses >= 6;
-
-      if (won || lost) {
-        session.finished = true;
-      }
+      if (won || lost) session.finished = true;
 
       return sendJSON(res, 200, {
         guess,
@@ -165,26 +153,14 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // Serve frontend files.
-    const requestedPath = url.pathname === "/"
-      ? "index.html"
-      : url.pathname.slice(1);
-
-    const filePath = path.resolve(
-      __dirname,
-      "public",
-      requestedPath
-    );
-
+    const requestedPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const filePath = path.resolve(__dirname, "public", requestedPath);
     const publicDir = path.resolve(__dirname, "public");
 
-    if (
-      !filePath.startsWith(publicDir + path.sep) &&
-      filePath !== path.join(publicDir, "index.html")
-    ) {
+    if (!filePath.startsWith(publicDir + path.sep) &&
+        filePath !== path.join(publicDir, "index.html")) {
       return sendJSON(res, 403, { error: "Forbidden" });
     }
-
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       return sendJSON(res, 404, { error: "Not found" });
     }
@@ -194,17 +170,13 @@ const server = http.createServer(async (req, res) => {
       ".css": "text/css",
       ".js": "application/javascript"
     };
-
     res.writeHead(200, {
-      "Content-Type":
-        extensions[path.extname(filePath)] || "application/octet-stream"
+      "Content-Type": extensions[path.extname(filePath)] || "application/octet-stream"
     });
-
     fs.createReadStream(filePath).pipe(res);
-
   } catch (error) {
     console.error(error);
-    sendJSON(res, 500, { error: "Internal server error." });
+    sendJSON(res, 500, { error: error.message || "Internal server error." });
   }
 });
 
