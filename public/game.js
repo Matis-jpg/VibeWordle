@@ -7,7 +7,7 @@ const meaningButton = document.getElementById("meaningButton");
 let completedWord = "";
 
 const keys = ["QWERTYUIOP", "ASDFGHJKL", "ENTERZXCVBNMDEL"];
-let sessionId = "";
+let sessionId = localStorage.getItem("sessionId") || "";
 let currentGuess = "";
 let currentRow = 0;
 let gameOver = false;
@@ -156,6 +156,7 @@ async function startNewGame() {
 
     const result = await apiRequest("/api/new", { sessionId, wordLength });
     sessionId = result.sessionId;
+    localStorage.setItem("sessionId", sessionId);
     wordLength = result.wordLength;
     currentGuess = "";
     currentRow = 0;
